@@ -23,7 +23,7 @@ impl Watcher {
 
     pub fn handle_events(&mut self, _container_name: &str) -> io::Result<()> {
         let mut buffer = [0u8; 4096];
-        println!("Waiting for inotify events...");
+        println!("Waiting for changes...");
         let events = self.inotify.read_events_blocking(&mut buffer)?;
         println!("Events received");
 

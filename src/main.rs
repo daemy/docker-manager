@@ -26,9 +26,9 @@ fn main() {
     // Event loop
     loop {
         // Run docker logs -f {container-name}
-        if let Err(e) = run_command_async("docker", &["logs", container_name, "-f"]) {
-            eprintln!("Error during docker logs: {}", e);
-        }
+        //if let Err(e) = run_command_async("docker", &["logs", container_name, "-f"]) {
+        //    eprintln!("Error during docker logs: {}", e);
+        //}
 
         // Handle file changes
         if let Err(e) = watcher.handle_events(&container_name) {

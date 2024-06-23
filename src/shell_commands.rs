@@ -1,7 +1,7 @@
-
 use std::io::{self, BufRead};
 use std::process::{Command, Stdio};
 use std::thread;
+use regex::Regex;
 
 pub fn run_command(command: &str, args: &[&str]) -> io::Result<()> {
     println!("Running command: {} {:?}", command, args);
@@ -11,23 +11,41 @@ pub fn run_command(command: &str, args: &[&str]) -> io::Result<()> {
         .stderr(Stdio::piped())
         .spawn()?;
 
+    let filter_pattern = Regex::new(r"INFO|terminko-backend").expect("Invalid regex pattern"); // Change the pattern to what you need
+
     if let Some(stdout) = child.stdout.take() {
         let stdout_reader = io::BufReader::new(stdout);
         for line in stdout_reader.lines() {
-            println!("{}", line?);
+            match line {
+                Ok(line) => {
+                    if filter_pattern.is_match(&line) {
+                        println!("{}", line);
+                    }
+                }
+                Err(e) => eprintln!("Error reading stdout: {}", e),
+            }
         }
     }
 
     if let Some(stderr) = child.stderr.take() {
         let stderr_reader = io::BufReader::new(stderr);
         for line in stderr_reader.lines() {
-            eprintln!("{}", line?);
+            match line {
+                Ok(line) => {
+                    if filter_pattern.is_match(&line) {
+                        eprintln!("{}", line);
+                    }
+                }
+                Err(e) => eprintln!("Error reading stderr: {}", e),
+            }
         }
     }
 
     let status = child.wait()?;
     if !status.success() {
         return Err(io::Error::new(io::ErrorKind::Other, "Command failed"));
+    } else {
+        println!("Command: {} finished successfully.", command);
     }
 
     Ok(())
