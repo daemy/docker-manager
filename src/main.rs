@@ -1,16 +1,13 @@
-extern crate inotify;
+mod shell_commands;
+mod watcher;
+mod ui;
+mod utils;
 
 use std::env;
-use std::io::{self, BufRead};
-use std::process::{Command, Stdio};
-use inotify::{
-    WatchMask,
-    Inotify,
-};
-
+use shell_commands::run_command_async;
+use watcher::Watcher;
 
 fn main() {
-
     // Get the container name from command line arguments
     let args: Vec<String> = env::args().collect();
 
@@ -21,84 +18,21 @@ fn main() {
 
     let container_name = &args[1];
 
-    let mut inotify = Inotify::init()
-        .expect("Failed to initialize inotify");
-
-    let current_dir = env::current_dir()
-        .expect("Failed to determine current directory");
-
-    inotify
-        .watches()
-        .add(
-            current_dir,
-            WatchMask::CLOSE_WRITE | WatchMask::CREATE | WatchMask::DELETE,
-        )
-        .expect("Failed to add inotify watch");
+    // Initialize the watcher
+    let mut watcher = Watcher::new().expect("Failed to initialize inotify");
 
     println!("Watching current directory for activity...");
 
-    let mut buffer = [0u8; 4096];
+    // Event loop
     loop {
         // Run docker logs -f {container-name}
-        if let Err(e) = run_command("docker", &["logs", container_name, "-f"]) {
+        if let Err(e) = run_command_async("docker", &["logs", container_name, "-f"]) {
             eprintln!("Error during docker logs: {}", e);
         }
-        let events = inotify
-            .read_events_blocking(&mut buffer)
-            .expect("Failed to read inotify events");
 
-        for event in events {
-            println!("File change detected: {:?}", event);
-
-            // Build and bring up Docker containers
-            println!("Rebuilding and restarting containers...");
-            // Run docker-compose build
-            if let Err(e) = run_command("docker-compose", &["-f", "docker-compose-dev.yml", "build", "--no-cache"]) {
-                eprintln!("Error during build: {}", e);
-                continue;
-            }
-
-            // Run docker-compose up
-            if let Err(e) = run_command("docker-compose", &["-f", "docker-compose-dev.yml", "up", "-d"]) {
-                eprintln!("Error during up: {}", e);
-                continue;
-            }
-
-            println!("Containers have been restarted.");
-
-            // Run docker logs -f {container-name}
-            if let Err(e) = run_command("docker", &["logs", container_name, "-f"]) {
-                eprintln!("Error during docker logs: {}", e);
-            }
+        // Handle file changes
+        if let Err(e) = watcher.handle_events(&container_name) {
+            eprintln!("Error handling events: {}", e);
         }
     }
-}
-
-fn run_command(command: &str, args: &[&str]) -> io::Result<()> {
-    let mut child = Command::new(command)
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-
-    if let Some(stdout) = child.stdout.take() {
-        let stdout_reader = io::BufReader::new(stdout);
-        for line in stdout_reader.lines() {
-            println!("{}", line?);
-        }
-    }
-
-    if let Some(stderr) = child.stderr.take() {
-        let stderr_reader = io::BufReader::new(stderr);
-        for line in stderr_reader.lines() {
-            eprintln!("{}", line?);
-        }
-    }
-
-    let status = child.wait()?;
-    if !status.success() {
-        return Err(io::Error::new(io::ErrorKind::Other, "Command failed"));
-    }
-
-    Ok(())
 }
