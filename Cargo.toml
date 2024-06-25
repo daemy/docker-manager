@@ -5,7 +5,8 @@ edition = "2021"
 
 [dependencies]
 crossterm = "0.27.0"
-inotify = "0.10.2"
+notify = { version = "6.1.1", features = ["serde"] }
 ratatui = { version = "0.26.3", features = ["serde"] }
 regex = "1.10.5"
 walkdir = "2.5.0"
+

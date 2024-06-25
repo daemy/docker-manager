@@ -1,28 +1,30 @@
-extern crate inotify;
+extern crate notify;
 
 use std::collections::HashSet;
-use inotify::{Inotify, WatchMask, EventMask};
 use std::env;
 //use std::fs;
 use std::io;
 use std::thread;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, mpsc::{channel, Receiver}};
 use crate::shell_commands::run_command;
 use walkdir::WalkDir;
+use notify::{Config, Watcher, RecommendedWatcher, RecursiveMode, Result, Event, Error};
 
-pub struct Watcher {
-    inotify: Inotify,
+pub struct FileWatcher {
     watched_files: HashSet<PathBuf>,
-    logs: Vec<String>,
+    logs: Arc<Mutex<Vec<String>>>,
+    rx: Receiver<Result<Event>>,
+    watcher: RecommendedWatcher,
 }
 
-impl Watcher {
-    pub fn new() -> io::Result<Watcher> {
-        let inotify = Inotify::init()?;
+impl FileWatcher {
+    pub fn new() -> io::Result<Arc<Mutex<FileWatcher>>> {
         let current_dir = env::current_dir()?;
-        let mut logs = Vec::new();
-        logs.push(format!("Watching directory: {:?}", current_dir));
+        let logs = Arc::new(Mutex::new(vec![
+            "Started docker-manager successfully.".to_string(),
+            format!("Watching directory: {:?}", current_dir),
+        ]));
 
         // Collect a list of files in the watched directory and all subdirectories
         let mut watched_files = HashSet::new();
@@ -33,66 +35,71 @@ impl Watcher {
                 watched_files.insert(path);
             }
         }
-        inotify.watches().add(
-            &current_dir,
-            WatchMask::CLOSE_WRITE | WatchMask::CREATE | WatchMask::DELETE,
-        )?;
 
-        Ok(Watcher { inotify, watched_files, logs })
-    }
+        let (tx, rx) = channel();
+        let watcher = RecommendedWatcher::new(tx, Config::default()).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
-    pub fn get_watched_files(&self) -> &HashSet<PathBuf> {
-        &self.watched_files
-    }
+        // Initialize FileWatcher
+        let file_watcher = Arc::new(Mutex::new(FileWatcher {
+            watched_files,
+            logs: Arc::clone(&logs),
+            rx,
+            watcher,
+        }));
 
-    pub fn get_logs(&self) -> &Vec<String> {
-        &self.logs
+        // Start watching the directory
+        //watcher.watch(&current_dir, RecursiveMode::Recursive).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+        // Clone file_watcher and logs for running file event watcher on separate thread
+        let file_watcher_clone = Arc::clone(&file_watcher);
+        thread::spawn(move || {
+            let mut file_watcher = file_watcher_clone.lock().unwrap();
+            file_watcher.handle_events().unwrap();
+        });
+
+        Ok(file_watcher)
     }
 
     fn should_watch(&self, filepath: &PathBuf) -> bool {
         self.watched_files.contains(filepath)
     }
 
-    pub fn handle_events(&mut self, _container_name: &str) -> io::Result<()> {
-        let mut buffer = [0u8; 4096];
-        self.logs.push("Waiting for changes...".to_string());
-        let events = match self.inotify.read_events_blocking(&mut buffer) {
-            Ok(events) => events,
-            Err(err) => {
-                // Handle the error (e.g., log it, return early)
-                self.logs.push(format!("Error reading events: {}", err));
-                return Err(err);
-            },
-        };
+    fn handle_events(&mut self) -> io::Result<()> {
+        {
+            let mut logs = self.logs.lock().unwrap();
+            logs.push("Waiting for changes...".to_string());
+        }
 
-        for event in events {
-            if let Some(name) = event.name {
-                let filepath = env::current_dir()?.join(name);
-
-                if !self.should_watch(&filepath) {
-                    continue;
-                } 
-                if event.mask.contains(EventMask::CLOSE_WRITE) {
-                    self.logs.push(format!("File change detected: {:?}", event));
-
-                    // Debounce mechanism: introduce a short delay to avoid multiple rapid restarts
-                    thread::sleep(Duration::from_secs(1));
-
-                    // Build and bring up Docker containers
-                    self.logs.push("Rebuilding and restarting containers...".to_string());
-                    //if let Err(e) = run_command("docker-compose", &["-f", "docker-compose-dev.yml", "build", "--no-cache"]) {
-                    //    self.logs.push(format!("Error during building containers: {}", e));
-                    //    continue;
-                    //
-                    //if let Err(e) = run_command("docker-compose", &["-f", "docker-compose-dev.yml", "up", "-d"]) {
-                    //    self.logs.push(format!("Error during starting containers: {}", e));
-                    //    continue;
-                    //}
-                    self.logs.push("Containers have been restarted.".to_string());
-                }
+        // Here wait for event changes
+        while let Ok(res) = self.rx.recv() {
+            match res {
+                Ok(event) => {
+                    let mut logs = self.logs.lock().unwrap();
+                    logs.push(format!("Change: {:?}", event));
+                    for path in event.paths {
+                        if path.is_file() {
+                            logs.push(format!("File change detected: {:?}", path));
+                            logs.push("Rebuilding and restarting containers...".to_string());
+                            // Execute your command here, e.g., run_command("docker-compose restart")
+                            logs.push("Containers have been restarted.".to_string());
+                        }
+                    }
+                },
+                Err(e) => {
+                    let mut logs = self.logs.lock().unwrap();
+                    logs.push(format!("Watch error: {:?}", e));
+                },
             }
         }
+
         Ok(())
     }
-}
 
+    pub fn get_watched_files(&self) -> &HashSet<PathBuf> {
+        &self.watched_files
+    }
+
+    pub fn get_logs(&self) -> Arc<Mutex<Vec<String>>> {
+        Arc::clone(&self.logs)
+    }
+}
