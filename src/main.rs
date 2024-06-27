@@ -37,20 +37,14 @@ fn main() -> io::Result<()> {
 pub struct App {
     selected_page: u8,
     exit: bool,
-    watcher: Arc<Mutex<FileWatcher>>,
+    watcher: FileWatcher,
 }
 
 impl App {
     pub fn new(container_name: String) -> App {
-        let watcher = FileWatcher::new().expect("Failed to initialize FileWatcher");
+        let mut watcher: FileWatcher = FileWatcher::new().expect("Failed to initialize FileWatcher");
 
-        // Clone Arc for the thread
-        //let watcher_clone = Arc::clone(&watcher);
-        //thread::spawn(move || {
-        //    let container_name = container_name.clone();
-        //    let mut watcher = watcher_clone.lock().unwrap();
-        //    watcher.handle_events(&container_name).expect("Failed to handle file events");
-        //});
+        //watcher.handle_events().expect("Failed to handle file events!");
 
         App {
             selected_page: 1,
@@ -129,7 +123,8 @@ impl Widget for &App {
                     )
                     .borders(Borders::ALL)
                     .border_set(border::THICK);
-
+                let mut watcher_mut = self.watcher;
+                watcher_mut.handle_events().expect("Failed to handle file events!");
                 //let logs: Vec<ListItem> = {
                 //    let mut watcher = self.watcher.lock().unwrap();
                 //    watcher.get_logs()
@@ -173,32 +168,31 @@ impl Widget for &App {
                     .borders(Borders::ALL)
                     .border_set(border::THICK);
 
-                //let watched_files: Vec<PathBuf> = {
-                //    let watcher = self.watcher.lock().unwrap();
-                //    watcher.get_watched_files()
-                //        .iter()
-                //        .cloned()
-                //        .collect()
-                //};
+                let watched_files: Vec<PathBuf> = {
+                    self.watcher.get_watched_files()
+                        .iter()
+                        .cloned()
+                        .collect()
+                };
 
-                //let items: Vec<ListItem> = watched_files
-                //    .iter()
-                //    .map(|file| ListItem::new(Span::styled(
-                //        file.display().to_string(),
-                //        Style::default().add_modifier(Modifier::BOLD),
-                //    )))
-                //    .collect();
+                let items: Vec<ListItem> = watched_files
+                    .iter()
+                    .map(|file| ListItem::new(Span::styled(
+                        file.display().to_string(),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    )))
+                    .collect();
 
-                //Widget::render(
-                //    List::new(items)
-                //        .block(block)
-                //        .direction(ListDirection::TopToBottom),
-                //    area,
-                //    buf,
-                //);
-                Paragraph::new("Blabla2")
-                    .block(block)
-                    .render(area, buf);
+                Widget::render(
+                    List::new(items)
+                        .block(block)
+                        .direction(ListDirection::TopToBottom),
+                    area,
+                    buf,
+                );
+                //Paragraph::new("Blabla2")
+                //    .block(block)
+                //    .render(area, buf);
             }
             3 => {
 

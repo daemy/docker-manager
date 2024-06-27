@@ -9,4 +9,3 @@ notify = { version = "6.1.1", features = ["serde"] }
 ratatui = { version = "0.26.3", features = ["serde"] }
 regex = "1.10.5"
 walkdir = "2.5.0"
-
