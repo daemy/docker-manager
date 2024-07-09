@@ -5,8 +5,11 @@ mod shell_commands;
 use std::io;
 use std::env;
 use std::thread;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock, mpsc::{channel, Sender}};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+use crossbeam_channel::{unbounded, tick, select, Receiver};
 
 use crate::watcher::FileWatcher;
 
@@ -17,47 +20,91 @@ use ratatui::{
     widgets::{block::*, *},
 };
 
+
 fn main() -> io::Result<()> {
     // Get the container name from command line arguments
-    let args: Vec<String> = env::args().collect();
+    let _args: Vec<String> = env::args().collect();
 
-    if args.len() != 2 {
+    if _args.len() != 2 {
         eprintln!("Usage: docker-manager <container-name>");
         std::process::exit(1);
     }
 
-    let container_name = args[1].clone();
+    let _container_name = _args[1].clone();
     let args: Vec<String> = env::args().collect();
     let mut terminal = tui::init()?;
-    let app_result = App::new(container_name).run(&mut terminal);
+    let app_result = App::new(_container_name).run(&mut terminal);
     tui::restore()?;
     app_result
 }
 
+
 pub struct App {
     selected_page: u8,
     exit: bool,
-    watcher: FileWatcher,
+    watcher: Arc<RwLock<FileWatcher>>,
+    tick_rate: Duration,
+    // Add a receiver for tick events
+    tick_rx: crossbeam_channel::Receiver<Instant>,
+    input_rx: Receiver<Event>,
 }
 
 impl App {
-    pub fn new(container_name: String) -> App {
-        let mut watcher: FileWatcher = FileWatcher::new().expect("Failed to initialize FileWatcher");
+    pub fn new(_container_name: String) -> App {
+        let (tx, rx) = channel();
+        let watcher: FileWatcher = FileWatcher::new(tx).expect("Failed to initialize FileWatcher");
 
-        //watcher.handle_events().expect("Failed to handle file events!");
+        let watcher = Arc::new(RwLock::new(watcher));
+
+        let watcher_clone = Arc::clone(&watcher);
+
+        thread::spawn(move || {
+            while let Ok(res) = rx.recv() {
+                let mut watcher = watcher_clone.write().unwrap();
+                watcher.logs.push("Watching for changes...".to_string());
+                if let Err(e) = watcher.handle_event(res) {
+                    watcher.logs.push(format!("Error handling events: {}", e));
+                }
+            }
+        });
+
+        let tick_rate = Duration::from_millis(100); // Adjust as needed
+        let tick_rx = tick(tick_rate);
+
+        // Create input event channel using crossbeam_channel
+        let (input_tx, input_rx) = unbounded();
+
+        // Spawn a thread to handle input events
+        thread::spawn(move || {
+            while let Ok(event) = event::read() {
+                if input_tx.send(event).is_err() {
+                    break;
+                }
+            }
+        });
 
         App {
             selected_page: 1,
             exit: false,
             watcher,
+            tick_rate,
+            tick_rx,
+            input_rx,
         }
     }
     /// runs the application's main loop until the user quits
     pub fn run(&mut self, terminal: &mut tui::Tui) -> io::Result<()> {
-        // Initialize the watcher
         while !self.exit {
-            terminal.draw(|frame| self.render_frame(frame))?;
-            self.handle_events()?;
+            select! {
+                recv(self.tick_rx) -> _ => {
+                    terminal.draw(|frame| self.render_frame(frame))?;
+                }
+                recv(self.input_rx) -> event => {
+                    if let Ok(event) = event {
+                        self.handle_input_event(event)?;
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -67,12 +114,10 @@ impl App {
     }
 
     /// updates the application's state based on user input
-    fn handle_events(&mut self) -> io::Result<()> {
-        match event::read()? {
-            // it's important to check that the event is a key press event as
-            // crossterm also emits key release and repeat events on Windows.
+    fn handle_input_event(&mut self, event: Event) -> io::Result<()> {
+        match event {
             Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
-                self.handle_key_event(key_event)
+                self.handle_key_event(key_event);
             }
             _ => {}
         };
@@ -103,8 +148,8 @@ impl Widget for &App {
     fn render(self, area: Rect, buf: &mut Buffer) {
         match self.selected_page {
             1 => {
-                let title = Title::from(" Docker Manager ".bold());
-                let instructions = Title::from(Line::from(vec![
+                let instructions = Title::from(" Docker Manager ".bold());
+                let title = Title::from(Line::from(vec![
                     " Console ".bold().into(),
                     "<1>".red().bold(),
                     " File Observer ".into(),
@@ -123,32 +168,29 @@ impl Widget for &App {
                     )
                     .borders(Borders::ALL)
                     .border_set(border::THICK);
-                let mut watcher_mut = self.watcher;
-                watcher_mut.handle_events().expect("Failed to handle file events!");
-                //let logs: Vec<ListItem> = {
-                //    let mut watcher = self.watcher.lock().unwrap();
-                //    watcher.get_logs()
-                //        .lock()
-                //        .unwrap()
-                //        .iter()
-                //        .map(|log| ListItem::new(log.clone()))
-                //        .collect()
-                //};
-
-                //Widget::render(
-                //    List::new(logs)
-                //        .block(block)
-                //        .direction(ListDirection::TopToBottom),
-                //    area,
-                //    buf,
-                //);
-                Paragraph::new("Blabla")
-                    .block(block)
-                    .render(area, buf);
+                //let mut watcher_mut = self.watcher;
+                //watcher_mut.handle_events().expect("Failed to handle file events!");
+                let logs: Vec<ListItem> = {
+                    let watcher = self.watcher.read().unwrap();
+                    watcher.get_logs()
+                        .iter()
+                        .map(|log| ListItem::new(log.clone()))
+                        .collect()
+                };
+                Widget::render(
+                    List::new(logs)
+                        .block(block)
+                        .direction(ListDirection::TopToBottom),
+                    area,
+                    buf,
+                );
+                //Paragraph::new("Blabla")
+                //    .block(block)
+                //    .render(area, buf);
             }
             2 => {
-                let title = Title::from(" Docker Manager ".bold());
-                let instructions = Title::from(Line::from(vec![
+                let instructions = Title::from(" Docker Manager ".bold());
+                let title = Title::from(Line::from(vec![
                     " Console ".into(),
                     "<1>".blue().bold(),
                     " File Observer ".bold().into(),
@@ -168,8 +210,9 @@ impl Widget for &App {
                     .borders(Borders::ALL)
                     .border_set(border::THICK);
 
+
                 let watched_files: Vec<PathBuf> = {
-                    self.watcher.get_watched_files()
+                    self.watcher.read().unwrap().get_watched_files()
                         .iter()
                         .cloned()
                         .collect()
@@ -196,8 +239,8 @@ impl Widget for &App {
             }
             3 => {
 
-                let title = Title::from(" Docker Manager ".bold());
-                let instructions = Title::from(Line::from(vec![
+                let instructions = Title::from(" Docker Manager ".bold());
+                let title = Title::from(Line::from(vec![
                     " Console ".into(),
                     "<1>".blue().bold(),
                     " File Observer ".into(),

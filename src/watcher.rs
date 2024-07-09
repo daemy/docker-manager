@@ -2,24 +2,27 @@ extern crate notify;
 
 use std::collections::HashSet;
 use std::env;
-//use std::fs;
-use std::io;
-use std::thread;
+use std::io::{self, BufRead};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, mpsc::{channel, Receiver}};
-use crate::shell_commands::run_command;
+use std::sync::mpsc::{Sender};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use std::thread;
+use std::process::{Command, Stdio};
 use walkdir::WalkDir;
-use notify::{Config, Watcher, RecommendedWatcher, RecursiveMode, Result, Event, Error};
+use crate::shell_commands::run_command;
+use notify::{Config, Watcher, RecommendedWatcher, RecursiveMode, Result, Event};
 
 pub struct FileWatcher {
     watched_files: HashSet<PathBuf>,
-    logs: Vec<String>,
-    rx: Receiver<Result<Event>>,
+    pub logs: Vec<String>,
     watcher: RecommendedWatcher,
+    debounce_set: Arc<Mutex<HashSet<String>>>,
+    debounce_duration: Duration,
 }
 
 impl FileWatcher {
-    pub fn new() -> io::Result<FileWatcher> {
+    pub fn new(tx: Sender<Result<Event>>) -> io::Result<FileWatcher> {
         let current_dir = env::current_dir()?;
         let mut logs = Vec::new();
         // Collect a list of files in the watched directory and all subdirectories
@@ -33,15 +36,17 @@ impl FileWatcher {
         }
 
         logs.push("Initialized watcher...".to_string());
-        let (tx, rx) = channel();
-        let watcher = RecommendedWatcher::new(tx, Config::default()).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let mut watcher = RecommendedWatcher::new(tx, Config::default()).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+        watcher.watch(&current_dir, RecursiveMode::Recursive).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
         // Initialize FileWatcher
         let file_watcher = FileWatcher {
             watched_files,
             logs,
-            rx,
             watcher,
+            debounce_set: Arc::new(Mutex::new(HashSet::new())),
+            debounce_duration: Duration::from_secs(2),
         };
 
         Ok(file_watcher)
@@ -51,31 +56,48 @@ impl FileWatcher {
         self.watched_files.contains(filepath)
     }
 
-    pub fn handle_events(&mut self) -> io::Result<()> {
-        self.logs.push("Waiting for changes...".to_string());
+    pub fn handle_event(&mut self, res: Result<Event>) -> io::Result<()> {
 
         // Here wait for event changes
-        while let Ok(res) = self.rx.recv() {
-            match res {
-                Ok(event) => {
-                    self.logs.push(format!("Change: {:?}", event));
-                    for path in event.paths {
-                        if path.is_file() {
-                            self.logs.push(format!("File change detected: {:?}", path));
-                            self.logs.push("Rebuilding and restarting containers...".to_string());
-                            // Execute your command here, e.g., run_command("docker-compose restart")
-                            self.logs.push("Containers have been restarted.".to_string());
+        match res {
+            Ok(event) => {
+                //self.logs.push(format!("Change: {:?}", event));
+                for path in event.paths {
+                    if path.is_file() {
+                        let path_str = path.to_string_lossy().to_string();
+                        let debounce_set = Arc::clone(&self.debounce_set);
+                        let debounce_duration = self.debounce_duration;
+
+                        let mut debounce_guard = debounce_set.lock().unwrap();
+                        if debounce_guard.contains(&path_str) {
+                            continue;
                         }
+                        debounce_guard.insert(path_str.clone());
+                        self.logs.push(format!("File change detected: {:?}", path));
+                        self.logs.push("Rebuilding and restarting containers...".to_string());
+                        // Execute your command here, e.g., run_command("docker-compose restart")
+                        thread::spawn(move || {
+                            if let Err(e) = run_command("docker-compose", &["-f", "docker-compose-dev.yml", "build", "--no-cache"]) {
+                                //self.logs.push(format!("Error during build: {}", e));
+                            } else {
+                                //self.logs.push("Containers have been restarted.".to_string());
+                            }
+
+                            //`thread::sleep(&debounce_duration);
+                            //`let mut debounce_guard = debounce_set.lock().unwrap();
+                            //`debounce_guard.remove(&path_str);
+                        });
                     }
-                },
-                Err(e) => {
-                    self.logs.push(format!("Watch error: {:?}", e));
-                },
-            }
+                }
+            },
+            Err(e) => {
+                self.logs.push(format!("Watch error: {:?}", e));
+            },
         }
 
         Ok(())
     }
+
 
     pub fn get_watched_files(&self) -> &HashSet<PathBuf> {
         &self.watched_files
