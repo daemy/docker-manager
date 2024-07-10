@@ -60,10 +60,10 @@ impl App {
 
         thread::spawn(move || {
             while let Ok(res) = rx.recv() {
-                let mut watcher = watcher_clone.write().unwrap();
-                watcher.logs.push("Watching for changes...".to_string());
+                let mut watcher = watcher_clone.read().unwrap();
+                logs.push("Watching for changes...".to_string());
                 if let Err(e) = watcher.handle_event(res) {
-                    watcher.logs.push(format!("Error handling events: {}", e));
+                    eprintln!("Error handling events: {}", e);
                 }
             }
         });

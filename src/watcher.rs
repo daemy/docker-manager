@@ -5,7 +5,7 @@ use std::env;
 use std::io::{self, BufRead};
 use std::path::PathBuf;
 use std::sync::mpsc::{Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock, Mutex};
 use std::time::{Duration, Instant};
 use std::thread;
 use std::process::{Command, Stdio};
@@ -15,7 +15,7 @@ use notify::{Config, Watcher, RecommendedWatcher, RecursiveMode, Result, Event};
 
 pub struct FileWatcher {
     watched_files: HashSet<PathBuf>,
-    pub logs: Vec<String>,
+    pub logs: Arc<RwLock<Vec<String>>>,
     watcher: RecommendedWatcher,
     debounce_set: Arc<Mutex<HashSet<String>>>,
     debounce_duration: Duration,
@@ -36,6 +36,7 @@ impl FileWatcher {
         }
 
         logs.push("Initialized watcher...".to_string());
+        let logs = Arc::new(RwLock::new(logs));
         let mut watcher = RecommendedWatcher::new(tx, Config::default()).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
         watcher.watch(&current_dir, RecursiveMode::Recursive).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
@@ -72,26 +73,34 @@ impl FileWatcher {
                         if debounce_guard.contains(&path_str) {
                             continue;
                         }
-                        debounce_guard.insert(path_str.clone());
-                        self.logs.push(format!("File change detected: {:?}", path));
-                        self.logs.push("Rebuilding and restarting containers...".to_string());
-                        // Execute your command here, e.g., run_command("docker-compose restart")
-                        thread::spawn(move || {
-                            if let Err(e) = run_command("docker-compose", &["-f", "docker-compose-dev.yml", "build", "--no-cache"]) {
-                                //self.logs.push(format!("Error during build: {}", e));
-                            } else {
-                                //self.logs.push("Containers have been restarted.".to_string());
-                            }
 
-                            //`thread::sleep(&debounce_duration);
-                            //`let mut debounce_guard = debounce_set.lock().unwrap();
-                            //`debounce_guard.remove(&path_str);
+                        debounce_guard.insert(path_str.clone());
+                        let logs_clone: Arc<RwLock<Vec<String>>> = Arc::clone(&self.logs);
+                        {
+                            let mut logs = logs_clone.write().unwrap();
+                            logs.push(format!("File change detected: {:?}", path));
+                            logs.push("Rebuilding and restarting containers...".to_string());
+                        }
+                        // Execute your command here, e.g., run_command("docker-compose restart")
+                        //
+                        //
+                        thread::spawn(move || {
+                            let mut logs = logs_clone.write().unwrap();
+                            if let Err(e) = run_command("docker-compose", &["-f", "docker-compose-dev.yml", "build", "--no-cache"]) {
+                                logs.push(format!("Error during build: {}", e));
+                            } else {
+                                logs.push("Containers have been restarted.".to_string());
+                            }
                         });
+                        //thread::sleep(debounce_duration);
+                        //let mut debounce_guard = debounce_set.lock().unwrap();
+                        //debounce_guard.remove(&path_str);
                     }
                 }
             },
             Err(e) => {
-                self.logs.push(format!("Watch error: {:?}", e));
+                let mut logs = self.logs.write().unwrap();
+                logs.push(format!("Watch error: {:?}", e));
             },
         }
 
@@ -104,6 +113,6 @@ impl FileWatcher {
     }
 
     pub fn get_logs(&self) -> &Vec<String> {
-        &self.logs
+        &self.logs.read().unwrap()
     }
 }

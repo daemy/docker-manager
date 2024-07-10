@@ -1,19 +1,3 @@
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #!/bin/bash
 
 # Copy binary to /usr/local/bin
